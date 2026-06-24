@@ -19,8 +19,8 @@ PAPERS_DIR = "papers"
 CHROMA_DIR = "data/embeddings/chroma"
 COLLECTION_NAME = "academic_papers"
 
-CHUNK_SIZE = 900
-CHUNK_OVERLAP = 120
+CHUNK_SIZE = 600
+CHUNK_OVERLAP = 80
 
 
 def load_paper_documents():
@@ -114,12 +114,12 @@ def main():
     index = build_or_load_index(vector_store, chroma_collection)
 
     query_engine = index.as_query_engine(
-        similarity_top_k=3,
+        similarity_top_k=2,
         response_mode="compact",
     )
 
     question = (
-        "Using only the provided source, explain why light for eye tracking is important"
+        "What types of eye-tracking data are collected by VR devices?"
     )
 
     print("\nQuestion:")
@@ -133,6 +133,11 @@ def main():
         print("\nQuery timed out while waiting for Ollama response.")
         print("Try a smaller model or reduce retrieved context/chunk size.")
         return
+
+    print("\nRetrieved chunks:")
+    for i, source_node in enumerate(response.source_nodes, start=1):
+        print(f"\nChunk {i}")
+        print(source_node.node.text[:800])
 
     print("\nAnswer:")
     print(response)
