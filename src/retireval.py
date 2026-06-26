@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import List
 
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.llms.ollama import Ollama
@@ -11,7 +12,7 @@ from qdrant_client import QdrantClient
 DEFAULT_QDRANT_PATH = Path("data/embeddings/qdrant")
 DEFAULT_COLLECTION = "papers_md"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
-DEFAULT_LLM_MODEL = "llama3.5:9b"
+DEFAULT_LLM_MODEL = "qwen3.5:9b"
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,8 +21,9 @@ def parse_args() -> argparse.Namespace:
 	)
 	parser.add_argument(
 		"question",
+		nargs="?",
 		type=str,
-		help="Question to search against the vector database.",
+		help="Question to search against the vector database. If omitted, you will be prompted.",
 	)
 	parser.add_argument(
 		"--top-k",
@@ -79,8 +81,40 @@ def build_context(results) -> str:
 	return "\n\n".join(context_blocks)
 
 
+def deduplicate_results(results, top_k: int):
+	"""Keep the highest-scoring unique chunks so repeated vectors do not dominate."""
+	unique = []
+	seen = set()
+
+	for point in results:
+		payload = point.payload or {}
+		filename = str(payload.get("file_name", "unknown"))
+		text = (payload.get("text") or "").strip()
+		if not text:
+			continue
+
+		key = (filename, text)
+		if key in seen:
+			continue
+
+		seen.add(key)
+		unique.append(point)
+
+		if len(unique) >= top_k:
+			break
+
+	return unique
+
+
 def main() -> None:
 	args = parse_args()
+
+	question = (args.question or "").strip()
+	if not question:
+		question = input("Ask a question: ").strip()
+
+	if not question:
+		raise ValueError("Question cannot be empty.")
 
 	if args.top_k <= 0:
 		raise ValueError("--top-k must be greater than 0")
@@ -97,21 +131,23 @@ def main() -> None:
 		)
 
 	embed_model = OllamaEmbedding(model_name=args.embed_model)
-	query_vector = embed_model.get_text_embedding(args.question)
+	query_vector = embed_model.get_text_embedding(question)
 
-	results = client.query_points(
+	candidate_results = client.query_points(
 		collection_name=args.collection,
 		query=query_vector,
-		limit=args.top_k,
+		limit=max(args.top_k * 4, args.top_k),
 		with_payload=True,
 	).points
+
+	results = deduplicate_results(candidate_results, args.top_k)
 
 	if not results:
 		print("No results found.")
 		return
 
 	print("Question:")
-	print(args.question)
+	print(question)
 	print(f"\nTop {len(results)} retrieved chunks:\n")
 
 	for idx, point in enumerate(results, start=1):
@@ -132,9 +168,18 @@ def main() -> None:
 
 	context = build_context(results)
 	prompt = (
-		"Use only the provided context to answer the question. "
-		"If the context is insufficient, say that clearly.\n\n"
-		f"Question:\n{args.question}\n\n"
+		"You are a retrieval-grounded assistant. Analyze the chunks first, then answer. "
+		"Use ONLY the provided context; do not use outside knowledge. "
+		"Cite chunk numbers in every evidence bullet and in the answer. "
+		"If context is insufficient, respond exactly: "
+		"I do not know based on the retrieved context.\n\n"
+		"Output format:\n"
+		"Analysis:\n"
+		"- <evidence bullet with citation like [Chunk 2]>\n"
+		"- <evidence bullet with citation>\n"
+		"Answer:\n"
+		"<final grounded answer with citations>\n\n"
+		f"Question:\n{question}\n\n"
 		f"Context:\n{context}\n"
 	)
 
