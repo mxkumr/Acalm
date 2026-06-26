@@ -12,7 +12,7 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 from pypdf import PdfReader
 
 
-LLM_MODEL = "qwen3:4b"
+LLM_MODEL = "qwen3.5:9b"
 EMBED_MODEL = "nomic-embed-text"
 
 PAPERS_DIR = "papers"
