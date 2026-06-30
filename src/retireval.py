@@ -1,23 +1,29 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
-from typing import List
 
-from llama_index.embeddings.ollama import OllamaEmbedding
-from llama_index.llms.ollama import Ollama
+from openai import OpenAI
+from dotenv import load_dotenv
 from qdrant_client import QdrantClient
+from llama_index.embeddings.ollama import OllamaEmbedding
 
 
 DEFAULT_QDRANT_PATH = Path("data/embeddings/qdrant")
 DEFAULT_COLLECTION = "papers_md"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
-DEFAULT_LLM_MODEL = "qwen3.5:9b"
+DEFAULT_LLM_MODEL = "deepseek-ai/deepseek-v4-flash"
+DEFAULT_LLM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_REASONING_EFFORT = "low"
+
+
+load_dotenv()
 
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="Retrieve top-k chunks from Qdrant for a question and answer using Ollama.",
+		description="Retrieve top-k chunks from Qdrant for a question and answer using an OpenAI-compatible model.",
 	)
 	parser.add_argument(
 		"question",
@@ -47,13 +53,32 @@ def parse_args() -> argparse.Namespace:
 		"--embed-model",
 		type=str,
 		default=DEFAULT_EMBED_MODEL,
-		help=f"Embedding model name (default: {DEFAULT_EMBED_MODEL})",
+		help=f"Local Ollama embedding model name (default: {DEFAULT_EMBED_MODEL})",
 	)
 	parser.add_argument(
 		"--llm-model",
 		type=str,
 		default=DEFAULT_LLM_MODEL,
-		help=f"Ollama model used for answer synthesis (default: {DEFAULT_LLM_MODEL})",
+		help=f"OpenAI-compatible model used for answer synthesis (default: {DEFAULT_LLM_MODEL})",
+	)
+	parser.add_argument(
+		"--llm-base-url",
+		type=str,
+		default=DEFAULT_LLM_BASE_URL,
+		help=f"Base URL for the OpenAI-compatible LLM API (default: {DEFAULT_LLM_BASE_URL})",
+	)
+	parser.add_argument(
+		"--llm-api-key",
+		type=str,
+		default=os.getenv("NVIDIA_API_KEY") or os.getenv("OPENAI_API_KEY"),
+		help="API key for the OpenAI-compatible LLM API (defaults to NVIDIA_API_KEY or OPENAI_API_KEY from the environment or .env)",
+	)
+	parser.add_argument(
+		"--reasoning-effort",
+		type=str,
+		default=DEFAULT_REASONING_EFFORT,
+		choices=["low", "medium", "high"],
+		help=f"Reasoning effort passed to the model (default: {DEFAULT_REASONING_EFFORT})",
 	)
 	parser.add_argument(
 		"--no-answer",
@@ -119,6 +144,11 @@ def main() -> None:
 	if args.top_k <= 0:
 		raise ValueError("--top-k must be greater than 0")
 
+	if not args.no_answer and not args.llm_api_key:
+		raise ValueError(
+			"An API key is required for answer synthesis. Set NVIDIA_API_KEY in your environment or .env, or pass --llm-api-key."
+		)
+
 	if not args.qdrant_path.exists():
 		raise FileNotFoundError(
 			f"Qdrant path not found: {args.qdrant_path}. Run vectorization first."
@@ -183,12 +213,36 @@ def main() -> None:
 		f"Context:\n{context}\n"
 	)
 
-	llm = Ollama(model=args.llm_model, request_timeout=300.0)
+	client = OpenAI(
+		base_url=args.llm_base_url,
+		api_key=args.llm_api_key,
+		timeout=60.0,
+	)
 
 	try:
-		answer = llm.complete(prompt)
+		print("Generating answer from NVIDIA API (this may take a moment)...")
+		completion = client.chat.completions.create(
+			model=args.llm_model,
+			messages=[{"role": "user", "content": prompt}],
+			temperature=1,
+			top_p=0.95,
+			max_tokens=16384,
+			extra_body={
+				"chat_template_kwargs": {
+					"thinking": True,
+					"reasoning_effort": args.reasoning_effort,
+				}
+			},
+			stream=False,
+		)
+		reasoning = getattr(completion.choices[0].message, "reasoning", None) or getattr(
+			completion.choices[0].message, "reasoning_content", None
+		)
 		print("Answer:\n")
-		print(answer.text.strip())
+		if reasoning:
+			print(reasoning)
+			print()
+		print((completion.choices[0].message.content or "").strip())
 	except Exception as exc:
 		print(f"Could not generate answer with model '{args.llm_model}': {exc}")
 		print("Retrieved chunks above are still valid for manual review.")
